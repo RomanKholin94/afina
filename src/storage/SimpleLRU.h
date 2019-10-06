@@ -17,12 +17,26 @@ namespace Backend {
  */
 class SimpleLRU : public Afina::Storage {
 public:
-    SimpleLRU(size_t max_size = 1024) : _max_size(max_size) {}
+    SimpleLRU(size_t max_size = 1024) : _max_size(max_size), _cur_size(max_size) {}
 
     ~SimpleLRU() {
         _lru_index.clear();
-        _lru_head.reset(); // TODO: Here is stack overflow
+        if (_lru_tail) {
+            _lru_tail.reset();
+        }
+        while (_lru_head) {
+            std::shared_ptr<lru_node> temp = _lru_head->next;
+            if (_lru_head->prev) {
+                _lru_head->prev.reset();
+            }
+            if (_lru_head->next) {
+                _lru_head->next.reset();
+            }
+            _lru_head = temp;
+        }
     }
+
+    bool PutAnyway(const std::string &key, const std::string &value);
 
     // Implements Afina::Storage interface
     bool Put(const std::string &key, const std::string &value) override;
@@ -44,22 +58,40 @@ private:
     using lru_node = struct lru_node {
         std::string key;
         std::string value;
-        std::unique_ptr<lru_node> prev;
-        std::unique_ptr<lru_node> next;
+        std::shared_ptr<lru_node> prev;
+        std::shared_ptr<lru_node> next;
     };
 
     // Maximum number of bytes could be stored in this cache.
     // i.e all (keys+values) must be less the _max_size
     std::size_t _max_size;
 
+    std::size_t _cur_size;
+
     // Main storage of lru_nodes, elements in this list ordered descending by "freshness": in the head
     // element that wasn't used for longest time.
     //
     // List owns all nodes
-    std::unique_ptr<lru_node> _lru_head;
+    std::shared_ptr<lru_node> _lru_head;
+
+    std::shared_ptr<lru_node> _lru_tail;
 
     // Index of nodes from list above, allows fast random access to elements by lru_node#key
     std::map<std::reference_wrapper<std::string>, std::reference_wrapper<lru_node>, std::less<std::string>> _lru_index;
+
+    std::reference_wrapper<lru_node> GetNode(std::string key, bool& success);
+
+    bool RemoveOldNodes(const size_t size);
+
+    void RearrangeToTail(std::reference_wrapper<lru_node> node);
+
+    void FillNode(
+        std::shared_ptr<lru_node> node,
+        const std::string &key,
+        const std::string &value,
+        std::shared_ptr<lru_node> prev,
+        std::shared_ptr<lru_node> next
+    );
 };
 
 } // namespace Backend

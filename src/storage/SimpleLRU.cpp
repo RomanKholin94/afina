@@ -18,7 +18,7 @@ bool SimpleLRU::RemoveOldNodes(const size_t size) {
         return false;
     }
     while (_lru_tail && _cur_size < size){
-        if (!Delete(_lru_head->key)) {
+        if (!SimpleLRU::Delete(_lru_head->key)) {
             return false;
         }
     }
@@ -46,16 +46,16 @@ void SimpleLRU::FillNode(
 }
 
 bool SimpleLRU::PutAnyway(const std::string &key, const std::string &value) {
-    if (!RemoveOldNodes(key.size() + value.size())) {
+    if (!SimpleLRU::RemoveOldNodes(key.size() + value.size())) {
         return false;
     }
     if (_lru_tail) {
         _lru_tail->next = std::make_shared<lru_node>(lru_node());
-        FillNode(_lru_tail->next, key, value, _lru_tail, nullptr);
+        SimpleLRU::FillNode(_lru_tail->next, key, value, _lru_tail, nullptr);
         _lru_tail = _lru_tail->next;
     } else {
         _lru_tail = _lru_head = std::make_shared<lru_node>(lru_node());
-        FillNode(_lru_tail, key, value, nullptr, nullptr);
+        SimpleLRU::FillNode(_lru_tail, key, value, nullptr, nullptr);
     }
      _cur_size -= key.size() + value.size();
     return true;
@@ -67,11 +67,11 @@ bool SimpleLRU::Put(const std::string &key, const std::string &value) {
     bool success = false;
     std::reference_wrapper<lru_node> node = GetNode(key, success);
     if (success) {
-        if (!Set(key, value)) {
+        if (!SimpleLRU::Set(key, value)) {
             return false;
         }
     } else {
-        if (!PutAnyway(key, value)) {
+        if (!SimpleLRU::PutAnyway(key, value)) {
             return false;
         }
     }
@@ -85,7 +85,7 @@ bool SimpleLRU::PutIfAbsent(const std::string &key, const std::string &value) {
     if (success) {
         return false;
     }
-    if (!PutAnyway(key, value)) {
+    if (!SimpleLRU::PutAnyway(key, value)) {
         return false;
     }
     return true;
@@ -115,13 +115,13 @@ bool SimpleLRU::Set(const std::string &key, const std::string &value) {
     if (!success) {
         return false;
     }
-    if (!RemoveOldNodes(value.size() - node.get().value.size())) {
+    if (!SimpleLRU::RemoveOldNodes(value.size() - node.get().value.size())) {
         return false;
     }
     _cur_size += value.size() - node.get().value.size();
     node.get().value = value;
 
-    RearrangeToTail(node);
+    SimpleLRU::RearrangeToTail(node);
 
     return true;
 }
@@ -161,7 +161,7 @@ bool SimpleLRU::Get(const std::string &key, std::string &value) {
     }
     value = node.get().value;
 
-    RearrangeToTail(node);
+    SimpleLRU::RearrangeToTail(node);
 
     return true;
 }

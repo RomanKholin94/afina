@@ -84,6 +84,11 @@ void ServerImpl::Stop() {
 
 // See Server.h
 void ServerImpl::Join() {
+    std::lock_guard<std::mutex> lock(_mutex);
+    for (int i = 0; i < _threads.size(); ++i) {
+        assert(_threads[i].joinable());
+        _threads[i].join();
+    }
     assert(_thread.joinable());
     _thread.join();
     close(_server_socket);
@@ -91,15 +96,6 @@ void ServerImpl::Join() {
 
 // See Server.h
 void ServerImpl::OnRun() {
-    // Here is connection state
-    // - parser: parse state of the stream
-    // - command_to_execute: last command parsed out of stream
-    // - arg_remains: how many bytes to read from stream to get command argument
-    // - argument_for_command: buffer stores argument
-    std::size_t arg_remains;
-    Protocol::Parser parser;
-    std::string argument_for_command;
-    std::unique_ptr<Execute::Command> command_to_execute;
     while (running.load()) {
         _logger->debug("waiting for connection...");
 
@@ -134,11 +130,127 @@ void ServerImpl::OnRun() {
 
         // TODO: Start new thread and process data from/to connection
         {
-            static const std::string msg = "TODO: start new thread and process memcached protocol instead";
-            if (send(client_socket, msg.data(), msg.size(), 0) <= 0) {
-                _logger->error("Failed to write response to client: {}", strerror(errno));
-            }
-            close(client_socket);
+            auto f = [&](const int client_socket) {
+                // Here is connection state
+                // - parser: parse state of the stream
+                // - command_to_execute: last command parsed out of stream
+                // - arg_remains: how many bytes to read from stream to get command argument
+                // - argument_for_command: buffer stores argument
+                std::size_t arg_remains;
+                Protocol::Parser parser;
+                std::string argument_for_command;
+                std::unique_ptr<Execute::Command> command_to_execute;
+                const int msg_size = 1024;
+                char msg[msg_size + 1];
+                int return_bytes, index = 0;
+                std::string out;
+                enum States {ReadThenParse, ReadThenExecute, Parse, Execute, Complete};
+                States state = States::ReadThenParse;
+
+                while (state != States::Complete) {
+                    if (state == States::ReadThenParse) {
+                        _logger->debug("State: ReadThenParse");
+                        return_bytes = read(client_socket, msg, msg_size);
+                        if (return_bytes < 0) {
+                            if (errno != EAGAIN) {
+                                _logger->error("Failed to read massege from client: {}", strerror(errno));
+                            } else {
+                                _logger->warn("Failed to read massege from client: {}", strerror(errno));
+                            }
+                            state = States::Complete;
+                        } else if (return_bytes == 0) {
+                            state = States::Complete;
+                        } else {
+                            state = States::Parse;
+                        }
+                    } else if (state == States::ReadThenExecute) {
+                        _logger->debug("State: ReadThenExecute");
+                        return_bytes = read(client_socket, msg, msg_size);
+                        if (return_bytes < 0) {
+                            if (errno != EAGAIN) {
+                                _logger->error("Failed to read massege from client: {}", strerror(errno));
+                            } else {
+                                _logger->warn("Failed to read massege from client: {}", strerror(errno));
+                            }
+                            state = States::Complete;
+                        } else if (return_bytes == 0) {
+                            state = States::Complete;
+                        } else {
+                            state = States::Execute;
+                        }
+                    } else if (state == States::Parse) {
+                        _logger->debug("State: Parse");
+                        size_t parsed;
+                        try {
+                            if (parser.Parse(msg + index, return_bytes, parsed)) {
+                                command_to_execute = parser.Build(arg_remains);
+                                index += parsed;
+                                if (index == return_bytes && 0 < arg_remains ) {
+                                    state = States::ReadThenExecute;
+                                    index = 0;
+                                } else {
+                                    state = States::Execute;
+                                }
+                            } else {
+                                state = States::ReadThenParse;
+                            }
+                        }
+                        catch(const std::runtime_error& error) {
+                            _logger->error(error.what());
+                            out = std::string("SERVER_ERROR ") + error.what() + std::string("\r\n");
+                            if (send(client_socket, out.data(), out.size(), 0) <= 0) {
+                                _logger->error("Failed to write response to client: {}", strerror(errno));
+                            }
+                            break;
+                        }
+                    } else if (state == States::Execute) {
+                        _logger->debug("State: Execute");
+                        while (index < return_bytes && argument_for_command.size() < arg_remains) {
+                            argument_for_command.push_back(msg[index++]);
+                        }
+                        if (argument_for_command.size() == arg_remains) {
+                            if (command_to_execute) {
+                                _logger->debug("Execute start");
+                                command_to_execute->Execute(*pStorage, argument_for_command, out);
+                                _logger->debug("Execute finish");
+                                out.push_back('\r');
+                                out.push_back('\n');
+                                if (send(client_socket, out.data(), out.size(), 0) <= 0) {
+                                    _logger->error("Failed to write response to client: {}", strerror(errno));
+                                }
+                                argument_for_command.clear();
+                                parser.Reset();
+                                if (index == return_bytes || index + 1 == return_bytes || index + 2 == return_bytes) {
+                                    state = States::ReadThenParse;
+                                } else {
+                                    state = States::Parse;
+                                }
+                                index = (index + 2) % return_bytes;
+                            } else {
+                                _logger->error("Failed to execute command");
+                                out = "SERVER_ERROR Failed to execute command\r\n";
+                                if (send(client_socket, out.data(), out.size(), 0) <= 0) {
+                                    _logger->error("Failed to write response to client: {}", strerror(errno));
+                                }
+                                break;
+                            }
+                        } else {
+                            index = 0;
+                            state = States::ReadThenExecute;
+                        }
+                    } else {
+                        _logger->error("There is no sush state");
+                        out = "SERVER_ERROR There is no sush state\r\n";
+                        if (send(client_socket, out.data(), out.size(), 0) <= 0) {
+                            _logger->error("Failed to write response to client: {}", strerror(errno));
+                        }
+                        break;
+                    }
+                }
+                close(client_socket);
+            };
+            std::lock_guard<std::mutex> lock(_mutex);
+            _threads.push_back(std::thread(f, client_socket));
         }
     }
 
